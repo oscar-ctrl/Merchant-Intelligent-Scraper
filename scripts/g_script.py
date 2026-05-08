@@ -39,7 +39,7 @@ MAX_GLOVO_STORES_PER_CITY = 5
 
 # Para probar en Colab/local pon True.
 # Para GitHub Actions pon False.
-FORCE_RUN = True
+FORCE_RUN = False
 
 PAUSE_CITY_S = 3.0
 PAUSE_LIST_S = 2.0
