@@ -2,12 +2,10 @@ name: Get Information
 
 on:
   schedule:
-    # Test: 16:45 y 17:00 hora España
+    # Test: 17:20 y 17:30 hora España
     # GitHub Actions usa UTC
-    # 16:45 CEST = 14:45 UTC
-    # 17:00 CEST = 15:00 UTC
-    - cron: "45 14 * * *"
-    - cron: "0 15 * * *"
+    - cron: "20 15 * * *"
+    - cron: "30 15 * * *"
 
   workflow_dispatch:
 
