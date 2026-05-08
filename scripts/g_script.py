@@ -47,8 +47,6 @@ PAUSE_STORE_S = 1.5
 
 TIMEZONE = "Europe/Madrid"
 
-# Ventana real cuando FORCE_RUN = False.
-# Permite 00:00, 00:30, 01:00, 01:30, 02:00, 02:30 y 03:00.
 REPARTO_PROPIO_MARKER = "El establecimiento entrega los pedidos directamente"
 
 PCT_RE = re.compile(r"(-?\d{1,3})\s*%")
@@ -338,6 +336,8 @@ def process_cards_until_5_glovo(
     seen_links,
     writer,
     fecha,
+    hora_ejecucion,
+    timestamp_ejecucion,
     city,
     landing_url,
     glovo_count,
@@ -374,6 +374,8 @@ def process_cards_until_5_glovo(
 
         writer.writerow([
             fecha,
+            hora_ejecucion,
+            timestamp_ejecucion,
             city,
             nombre,
             promo_text,
@@ -404,7 +406,12 @@ def main():
         return
 
     now = datetime.now(ZoneInfo(TIMEZONE))
+
     fecha_extraccion = now.strftime("%Y-%m-%d")
+    hora_ejecucion = now.strftime("%H:%M:%S")
+    timestamp_ejecucion = now.strftime("%Y-%m-%d %H:%M:%S %Z")
+
+    print(f"Hora de ejecución: {timestamp_ejecucion}")
 
     output_dir = "outputs"
     os.makedirs(output_dir, exist_ok=True)
@@ -413,23 +420,29 @@ def main():
 
     print(f"Output: {output_file}")
 
-    with open(output_file, "w", newline="", encoding="utf-8") as f:
+    file_exists = os.path.exists(output_file)
+    file_is_empty = (not file_exists) or os.path.getsize(output_file) == 0
+
+    with open(output_file, "a", newline="", encoding="utf-8") as f:
         w = csv.writer(f)
 
-        w.writerow([
-            "Fecha de extracción",
-            "Ciudad",
-            "Nombre",
-            "Promoción (texto)",
-            "Descuento normal (%)",
-            "Rating",
-            "Reviews Number",
-            "Categoria",
-            "Link",
-            "Prime",
-            "Descuento prime",
-            "Tipo de reparto",
-        ])
+        if file_is_empty:
+            w.writerow([
+                "Fecha de extracción",
+                "Hora ejecución",
+                "Timestamp ejecución",
+                "Ciudad",
+                "Nombre",
+                "Promoción (texto)",
+                "Descuento normal (%)",
+                "Rating",
+                "Reviews Number",
+                "Categoria",
+                "Link",
+                "Prime",
+                "Descuento prime",
+                "Tipo de reparto",
+            ])
 
         for city in CITIES_LIST:
             print(f"\n── Ciudad: {city} ──")
@@ -458,6 +471,8 @@ def main():
                 seen_links=seen_links,
                 writer=w,
                 fecha=fecha_extraccion,
+                hora_ejecucion=hora_ejecucion,
+                timestamp_ejecucion=timestamp_ejecucion,
                 city=city,
                 landing_url=base_url,
                 glovo_count=glovo_count,
@@ -505,6 +520,8 @@ def main():
                     seen_links=seen_links,
                     writer=w,
                     fecha=fecha_extraccion,
+                    hora_ejecucion=hora_ejecucion,
+                    timestamp_ejecucion=timestamp_ejecucion,
                     city=city,
                     landing_url=url,
                     glovo_count=glovo_count,
@@ -519,7 +536,7 @@ def main():
 
             time.sleep(PAUSE_CITY_S + random.uniform(0, 1.0))
 
-    print(f"\n✓ Scraping completado: {output_file}")
+    print(f"\n✓ Scraping completado en modo append: {output_file}")
 
 
 if __name__ == "__main__":
