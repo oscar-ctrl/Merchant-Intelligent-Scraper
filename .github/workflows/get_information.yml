@@ -4,8 +4,8 @@ on:
   schedule:
     # Test: 17:50 y 18:00 hora España
     # 15:50 y 16:00 UTC
-    - cron: "01 16 * * *"
-    - cron: "07 16 * * *"
+    - cron: "05 16 * * *"
+    - cron: "20 16 * * *"
 
   workflow_dispatch:
 
