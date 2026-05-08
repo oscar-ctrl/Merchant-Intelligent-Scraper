@@ -2,9 +2,11 @@ name: Get Information
 
 on:
   schedule:
-    # Cada 30 minutos en una ventana amplia UTC.
-    # El script filtra internamente Europe/Madrid entre 00:00 y 03:00.
-    - cron: "0,30 22-2 * * *"
+    # Test: 17:00 y 17:30 hora España.
+    # En horario de verano España = UTC+2.
+    # 17:00 CEST = 15:00 UTC
+    # 17:30 CEST = 15:30 UTC
+    - cron: "0,30 15 * * *"
 
   workflow_dispatch:
 
