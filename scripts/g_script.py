@@ -37,6 +37,9 @@ EXTRA_TYPES_TO_TRY = []
 
 MAX_GLOVO_STORES_PER_CITY = 5
 
+# Cuántas tiendas revisar para decidir si la ciudad está "cerrada"
+MAX_CARDS_TO_CHECK_CLOSED = 10
+
 # Para probar en Colab/local pon True.
 # Para GitHub Actions pon False.
 FORCE_RUN = False
@@ -48,6 +51,7 @@ PAUSE_STORE_S = 1.5
 TIMEZONE = "Europe/Madrid"
 
 REPARTO_PROPIO_MARKER = "El establecimiento entrega los pedidos directamente"
+CERRADO_MARKER = "aunque el establecimiento esté cerrado en el momento de hacer el pedido"
 
 PCT_RE = re.compile(r"(-?\d{1,3})\s*%")
 
@@ -269,32 +273,27 @@ def fetch(url, referer=None, retries=3):
 
 
 # =========================
-# Tipo de reparto
+# Estado y tipo de reparto
 # =========================
 
-def check_reparto_propio(store_url, referer=None):
+def check_store(store_url, referer=None):
     """
-    Devuelve:
-    - 'Propio' si la tienda hace su propio reparto.
-    - 'Glovo' si no aparece el marker de reparto propio.
-    - 'Error' si no se pudo obtener.
+    Devuelve (reparto, estado):
+      reparto: 'Propio' | 'Glovo' | 'Error' | 'Desconocido'
+      estado:  'Abierto' | 'Cerrado' | 'Desconocido'
     """
-
     if store_url == "-":
-        return "Desconocido"
+        return "Desconocido", "Desconocido"
 
     r = fetch(store_url, referer=referer)
 
-    if not r:
-        return "Error"
+    if not r or r.status_code != 200:
+        return "Error", "Desconocido"
 
-    if r.status_code != 200:
-        return "Error"
+    reparto = "Propio" if REPARTO_PROPIO_MARKER in r.text else "Glovo"
+    estado = "Cerrado" if CERRADO_MARKER in r.text else "Abierto"
 
-    if REPARTO_PROPIO_MARKER in r.text:
-        return "Propio"
-
-    return "Glovo"
+    return reparto, estado
 
 
 # =========================
@@ -328,49 +327,148 @@ def discover_list_urls(landing_html, city, base_list_path):
 
 
 # =========================
+# Recolector de cards de toda la ciudad
+# =========================
+
+def collect_all_city_cards(city, base_url, base_list_path, landing_html):
+    """
+    Recoge todas las cards únicas de la ciudad: landing + todas las sublistas.
+    Devuelve lista de (card, source_url).
+    """
+    soup = BeautifulSoup(landing_html, "html.parser")
+    landing_cards = get_cards(soup)
+
+    all_cards = [(c, base_url) for c in landing_cards]
+    seen_links = {abs_link(c.get("href")) for c in landing_cards}
+
+    print(f"  Landing {PRIMARY_TYPE}: {len(landing_cards)} cards.")
+
+    discovered = discover_list_urls(landing_html, city, base_list_path)
+
+    for t in EXTRA_TYPES_TO_TRY:
+        discovered.append(f"/es/pt/{city}/{t}/")
+
+    discovered = sorted(set(discovered))
+
+    for path in discovered:
+        url = urllib.parse.urljoin("https://glovoapp.com", path)
+
+        resp = fetch(url, referer=base_url)
+
+        if not resp or resp.status_code != 200:
+            continue
+
+        soup2 = BeautifulSoup(resp.text, "html.parser")
+        cards2 = get_cards(soup2)
+
+        if not cards2:
+            continue
+
+        nuevas = 0
+        for c in cards2:
+            link = abs_link(c.get("href"))
+            if link not in seen_links:
+                seen_links.add(link)
+                all_cards.append((c, url))
+                nuevas += 1
+
+        if nuevas:
+            print(f"  Sublista {path}: +{nuevas} cards nuevas.")
+
+        time.sleep(PAUSE_LIST_S + random.uniform(0, 1.0))
+
+    print(f"  Total cards únicas en {city}: {len(all_cards)}")
+    return all_cards
+
+
+# =========================
+# Comprobación de si la ciudad está cerrada
+# =========================
+
+def city_is_closed(all_cards, base_url):
+    """
+    Revisa hasta MAX_CARDS_TO_CHECK_CLOSED tiendas Glovo.
+    Si todas están cerradas → devuelve True.
+    Si alguna está abierta → devuelve False.
+    """
+    checked = 0
+
+    for card, source_url in all_cards:
+        if checked >= MAX_CARDS_TO_CHECK_CLOSED:
+            break
+
+        link = abs_link(card.get("href"))
+
+        if link == "-":
+            continue
+
+        reparto, estado = check_store(link, referer=base_url)
+
+        time.sleep(PAUSE_STORE_S + random.uniform(0, 0.5))
+
+        if reparto != "Glovo":
+            continue
+
+        checked += 1
+        print(f"    Check cierre #{checked}: {extract_name(card)} → {estado}")
+
+        if estado == "Abierto":
+            return False  # al menos una abierta → ciudad activa
+
+    if checked == 0:
+        print(f"  No se encontraron tiendas Glovo para verificar estado.")
+        return True  # sin tiendas Glovo = tratar como cerrado
+
+    print(f"  Las {checked} tiendas Glovo revisadas están cerradas.")
+    return True
+
+
+# =========================
 # Procesador de cards
 # =========================
 
 def process_cards_until_5_glovo(
-    cards,
-    seen_links,
+    all_cards,
     writer,
     fecha,
     hora_ejecucion,
     timestamp_ejecucion,
     city,
-    landing_url,
-    glovo_count,
+    base_url,
 ):
     """
-    Procesa cards hasta llegar a MAX_GLOVO_STORES_PER_CITY.
-    Solo escribe filas si Tipo de reparto == Glovo.
+    Recorre all_cards en orden hasta conseguir MAX_GLOVO_STORES_PER_CITY abiertas.
+    Escribe solo tiendas Glovo + Abiertas.
     """
+    glovo_count = 0
+    seen_written = set()
 
-    added_glovo = 0
-
-    for c in cards:
+    for card, source_url in all_cards:
         if glovo_count >= MAX_GLOVO_STORES_PER_CITY:
             break
 
-        link = abs_link(c.get("href"))
+        link = abs_link(card.get("href"))
 
-        if link in seen_links:
+        if link in seen_written:
             continue
 
-        seen_links.add(link)
+        nombre = extract_name(card)
+        promo_text, nd, prime, pd = extract_promos(card)
+        rating, reviews = extract_rating_reviews(card)
 
-        nombre = extract_name(c)
-        promo_text, nd, prime, pd = extract_promos(c)
-        rating, reviews = extract_rating_reviews(c)
-
-        reparto = check_reparto_propio(link, referer=landing_url)
+        reparto, estado = check_store(link, referer=source_url)
 
         time.sleep(PAUSE_STORE_S + random.uniform(0, 0.7))
 
         if reparto != "Glovo":
-            print(f"    Saltada: {nombre} | reparto={reparto}")
+            print(f"    Saltada (reparto propio): {nombre}")
             continue
+
+        if estado != "Abierto":
+            print(f"    Saltada (cerrada): {nombre}")
+            continue
+
+        seen_written.add(link)
 
         writer.writerow([
             fecha,
@@ -387,14 +485,13 @@ def process_cards_until_5_glovo(
             prime,
             pd,
             reparto,
+            estado,
         ])
 
         glovo_count += 1
-        added_glovo += 1
+        print(f"    Añadida Glovo abierta #{glovo_count}: {nombre}")
 
-        print(f"    Añadida Glovo #{glovo_count}: {nombre}")
-
-    return glovo_count, added_glovo
+    return glovo_count
 
 
 # =========================
@@ -442,13 +539,11 @@ def main():
                 "Prime",
                 "Descuento prime",
                 "Tipo de reparto",
+                "Estado",          # ← nueva columna
             ])
 
         for city in CITIES_LIST:
             print(f"\n── Ciudad: {city} ──")
-
-            seen_links = set()
-            glovo_count = 0
 
             base_url = f"https://glovoapp.com/es/es/{city}/{PRIMARY_TYPE}/"
             base_list_path = f"/es/pt/{city}/{PRIMARY_TYPE}/"
@@ -461,78 +556,41 @@ def main():
                 time.sleep(PAUSE_CITY_S)
                 continue
 
-            soup = BeautifulSoup(r.text, "html.parser")
-            cards = get_cards(soup)
+            # 1. Recoger TODAS las cards de la ciudad (landing + sublistas)
+            all_cards = collect_all_city_cards(
+                city=city,
+                base_url=base_url,
+                base_list_path=base_list_path,
+                landing_html=r.text,
+            )
 
-            print(f"  Landing {PRIMARY_TYPE}: {len(cards)} cards encontradas.")
+            if not all_cards:
+                print(f"  ⚠ Sin cards en {city}. Saltando.")
+                time.sleep(PAUSE_CITY_S)
+                continue
 
-            glovo_count, added = process_cards_until_5_glovo(
-                cards=cards,
-                seen_links=seen_links,
+            # 2. Comprobar si la ciudad está cerrada (primeras 10 Glovo)
+            print(f"  Verificando estado de apertura en {city}...")
+            if city_is_closed(all_cards, base_url):
+                print(f"  ✗ {city} cerrada a esta hora. No se escriben filas.")
+                time.sleep(PAUSE_CITY_S + random.uniform(0, 1.0))
+                continue
+
+            # 3. Procesar y escribir las tiendas abiertas
+            glovo_count = process_cards_until_5_glovo(
+                all_cards=all_cards,
                 writer=w,
                 fecha=fecha_extraccion,
                 hora_ejecucion=hora_ejecucion,
                 timestamp_ejecucion=timestamp_ejecucion,
                 city=city,
-                landing_url=base_url,
-                glovo_count=glovo_count,
+                base_url=base_url,
             )
-
-            print(f"  Landing: +{added} tiendas Glovo. Total ciudad: {glovo_count}")
 
             if glovo_count >= MAX_GLOVO_STORES_PER_CITY:
-                print(f"  ✓ Objetivo alcanzado en {city}: {glovo_count} tiendas Glovo.")
-                time.sleep(PAUSE_CITY_S + random.uniform(0, 1.0))
-                continue
-
-            discovered = discover_list_urls(
-                landing_html=r.text,
-                city=city,
-                base_list_path=base_list_path,
-            )
-
-            for t in EXTRA_TYPES_TO_TRY:
-                discovered.append(f"/es/pt/{city}/{t}/")
-
-            discovered = sorted(set(discovered))
-
-            for path in discovered:
-                if glovo_count >= MAX_GLOVO_STORES_PER_CITY:
-                    break
-
-                url = urllib.parse.urljoin("https://glovoapp.com", path)
-
-                resp = fetch(url, referer=base_url)
-
-                if not resp or resp.status_code != 200:
-                    continue
-
-                soup2 = BeautifulSoup(resp.text, "html.parser")
-                cards2 = get_cards(soup2)
-
-                if not cards2:
-                    continue
-
-                print(f"  Lista {path}: {len(cards2)} cards encontradas.")
-
-                glovo_count, new_here = process_cards_until_5_glovo(
-                    cards=cards2,
-                    seen_links=seen_links,
-                    writer=w,
-                    fecha=fecha_extraccion,
-                    hora_ejecucion=hora_ejecucion,
-                    timestamp_ejecucion=timestamp_ejecucion,
-                    city=city,
-                    landing_url=url,
-                    glovo_count=glovo_count,
-                )
-
-                print(f"  Lista {path}: +{new_here} tiendas Glovo. Total ciudad: {glovo_count}")
-
-                time.sleep(PAUSE_LIST_S + random.uniform(0, 1.0))
-
-            if glovo_count < MAX_GLOVO_STORES_PER_CITY:
-                print(f"  ⚠ Solo se encontraron {glovo_count} tiendas Glovo en {city}.")
+                print(f"  ✓ Objetivo alcanzado en {city}: {glovo_count} tiendas Glovo abiertas.")
+            else:
+                print(f"  ⚠ Solo {glovo_count} tiendas Glovo abiertas encontradas en {city}.")
 
             time.sleep(PAUSE_CITY_S + random.uniform(0, 1.0))
 
